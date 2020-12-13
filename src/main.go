@@ -1,7 +1,5 @@
 package main
 
-//import "time"
-import "io"
 import "bufio"
 import "fmt"
 import "os"
@@ -9,25 +7,19 @@ import "strings"
 import "os/exec"
 import MQTT "github.com/eclipse/paho.mqtt.golang"
 
-type Message struct {
-	Topic   string
-	Payload string
-}
-
-var messages = make(chan Message)
 var commands = make(chan string)
 
 func defaultHandler(client MQTT.Client, msg MQTT.Message) {
-	message := Message{msg.Topic(), string(msg.Payload())}
-	fmt.Printf("RECEIVED TOPIC: %s MESSAGE: %s\n", message.Topic, message.Payload)
-	commands <- fmt.Sprintf("%s\n", message.Payload)
+	fmt.Printf("RECEIVED TOPIC: %s MESSAGE: %s\n", msg.Topic(), string(msg.Payload()))
+	commands <- fmt.Sprintf("%s\n", string(msg.Payload()))
 }
 
 func setupMqtt() {
-	broker := "tcp://iot.labs:1883"
+	broker := getEnv("MQTT_BROKER", "tcp://iot.labs:1883")
+	topic := getEnv("MQTT_TOPIC", "KODI_ON")
 	id := "MQTT_to_CEC"
-	topic := "KODI_ON"
 
+	fmt.Printf("Connecting to %s as %s\n", broker, id)
 	opts := MQTT.NewClientOptions()
 	opts.AddBroker(broker)
 	opts.SetClientID(id)
@@ -39,15 +31,13 @@ func setupMqtt() {
 	}
 
 	fmt.Println("Connected")
-
+	fmt.Printf("Subscribing to %s\n", topic)
 	if token := client.Subscribe(topic, 0, nil); token.Wait() && token.Error() != nil {
 		fmt.Println(token.Error())
 		os.Exit(1)
 	}
 
 	fmt.Println("Subscribed")
-
-	//client.Disconnect(250)
 }
 
 func main() {
@@ -80,21 +70,19 @@ func main() {
 	go func() {
 		for true {
 			answer, err := reader.ReadString('\n')
-			if err == io.EOF {
-				//close(answers)
-				fmt.Printf("Blowing up")
-				return
-			}
-			// FIXME if FD is closed i die
 			if err != nil {
 				panic(err)
 			}
 			answer = strings.TrimSpace(answer)
 			fmt.Printf("Got back: <%s>\n", answer)
-			//answers <- answer
-			// FIXME read from here
 		}
 	}()
 
 	c.Wait()
+}
+func getEnv(key, fallback string) string {
+	if value, ok := os.LookupEnv(key); ok {
+		return value
+	}
+	return fallback
 }
