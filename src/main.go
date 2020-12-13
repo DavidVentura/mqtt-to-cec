@@ -1,17 +1,39 @@
 package main
 
-import "bufio"
-import "fmt"
-import "os"
-import "strings"
-import "os/exec"
+import (
+	"bufio"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+)
 import MQTT "github.com/eclipse/paho.mqtt.golang"
 
 var commands = make(chan string)
+var TV_ID = getEnv("TV_ID", "0000")
+
+func payloadToCommand(payload string) (string, error) {
+	switch payload {
+	case "MAKE_SOURCE_ACTIVE":
+		return "as", nil
+	case "POWER_ON":
+		return fmt.Sprintf("on %s", TV_ID), nil
+	case "POWER_OFF":
+		return fmt.Sprintf("standby %s", TV_ID), nil
+	default:
+		return "", errors.New(fmt.Sprintf("Payload %s is unsupported", payload))
+	}
+}
 
 func defaultHandler(client MQTT.Client, msg MQTT.Message) {
 	fmt.Printf("< [%s]: %s\n", msg.Topic(), string(msg.Payload()))
-	commands <- string(msg.Payload())
+	command, err := payloadToCommand(string(msg.Payload()))
+	if err != nil {
+		fmt.Printf("ERROR: %s\n", err)
+		return
+	}
+	commands <- command
 }
 
 func setupMqtt() {
@@ -40,8 +62,7 @@ func setupMqtt() {
 	fmt.Println("Subscribed")
 }
 
-func main() {
-	setupMqtt()
+func runCecClient() {
 	c := exec.Command("cec-client", "-d", "1")
 	stdin, err := c.StdinPipe()
 	if err != nil {
@@ -79,6 +100,11 @@ func main() {
 	}()
 
 	c.Wait()
+}
+func main() {
+	setupMqtt()
+	fmt.Printf("Using TV_ID: %s\n", TV_ID)
+	runCecClient()
 }
 func getEnv(key, fallback string) string {
 	if value, ok := os.LookupEnv(key); ok {
