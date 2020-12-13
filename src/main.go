@@ -10,8 +10,8 @@ import MQTT "github.com/eclipse/paho.mqtt.golang"
 var commands = make(chan string)
 
 func defaultHandler(client MQTT.Client, msg MQTT.Message) {
-	fmt.Printf("RECEIVED TOPIC: %s MESSAGE: %s\n", msg.Topic(), string(msg.Payload()))
-	commands <- fmt.Sprintf("%s\n", string(msg.Payload()))
+	fmt.Printf("< [%s]: %s\n", msg.Topic(), string(msg.Payload()))
+	commands <- string(msg.Payload())
 }
 
 func setupMqtt() {
@@ -59,7 +59,7 @@ func main() {
 
 	go func() {
 		for command := range commands {
-			_, err = stdin.Write([]byte(command))
+			_, err = stdin.Write([]byte(fmt.Sprintf("%s\n", command)))
 			if err != nil {
 				panic(err)
 			}
