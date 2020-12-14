@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 import MQTT "github.com/eclipse/paho.mqtt.golang"
 
@@ -46,6 +47,7 @@ func setupMqtt() {
 	opts.AddBroker(broker)
 	opts.SetClientID(id)
 	opts.SetDefaultPublishHandler(defaultHandler)
+	opts.SetKeepAlive(5 * time.Second)
 	client := MQTT.NewClient(opts)
 
 	if token := client.Connect(); token.Wait() && token.Error() != nil {
