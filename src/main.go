@@ -1,52 +1,29 @@
 package main
 
 import (
-	"bufio"
-	"errors"
 	"fmt"
+	"io/ioutil"
+	"net"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 )
 import MQTT "github.com/eclipse/paho.mqtt.golang"
 
-var commands = make(chan string)
-var TV_ID = getEnv("TV_ID", "0000")
-
-func payloadToCommand(payload string) (string, error) {
-	switch payload {
-	case "MAKE_SOURCE_ACTIVE":
-		return "as", nil
-	case "POWER_ON":
-		return fmt.Sprintf("on %s", TV_ID), nil
-	case "POWER_OFF":
-		return fmt.Sprintf("standby %s", TV_ID), nil
-	default:
-		return "", errors.New(fmt.Sprintf("Payload %s is unsupported", payload))
-	}
+var tcpData = make(chan string, 1)
+var MACToName = map[string]string{
+	"F4:60:E2:B4:68:C4": "David",
+	"A4:50:46:5B:FD:E1": "Tati",
 }
 
-func defaultHandler(client MQTT.Client, msg MQTT.Message) {
-	fmt.Printf("< [%s]: %s\n", msg.Topic(), string(msg.Payload()))
-	command, err := payloadToCommand(string(msg.Payload()))
-	if err != nil {
-		fmt.Printf("ERROR: %s\n", err)
-		return
-	}
-	commands <- command
-}
-
-func setupMqtt() {
+func setupMqtt() MQTT.Client {
 	broker := getEnv("MQTT_BROKER", "tcp://iot.labs:1883")
-	topic := getEnv("MQTT_TOPIC", "KODI_ON")
-	id := "MQTT_to_CEC"
+	id := "BRIDGE_TO_MQTT"
 
 	fmt.Printf("Connecting to %s as %s\n", broker, id)
 	opts := MQTT.NewClientOptions()
 	opts.AddBroker(broker)
 	opts.SetClientID(id)
-	opts.SetDefaultPublishHandler(defaultHandler)
 	opts.SetKeepAlive(5 * time.Second)
 	client := MQTT.NewClient(opts)
 
@@ -55,62 +32,111 @@ func setupMqtt() {
 	}
 
 	fmt.Println("Connected")
-	fmt.Printf("Subscribing to %s\n", topic)
-	if token := client.Subscribe(topic, 0, nil); token.Wait() && token.Error() != nil {
-		fmt.Println(token.Error())
-		os.Exit(1)
-	}
-
-	fmt.Println("Subscribed")
+	return client
 }
 
-func runCecClient() {
-	c := exec.Command("cec-client", "-d", "1")
-	stdin, err := c.StdinPipe()
-	if err != nil {
-		panic(err)
-	}
-	stdout, err := c.StdoutPipe()
-	if err != nil {
-		panic(err)
-	}
-	reader := bufio.NewReader(stdout)
-	err = c.Start()
-	if err != nil {
-		panic(err)
-	}
+func textToPresent(packet string) []string {
+	var ret []string
 
-	go func() {
-		for command := range commands {
-			_, err = stdin.Write([]byte(fmt.Sprintf("%s\n", command)))
-			if err != nil {
-				panic(err)
-			}
-			fmt.Printf("Wrote <%s>\n", strings.TrimSpace(command))
+	for _, line := range strings.Split(packet, "\n") {
+		if val, ok := MACToName[line]; ok {
+			// fmt.Printf("MAC found %s = %s\n", line, val)
+			ret = append(ret, val)
 		}
-	}()
+	}
 
-	go func() {
-		for true {
-			answer, err := reader.ReadString('\n')
-			if err != nil {
-				panic(err)
-			}
-			answer = strings.TrimSpace(answer)
-			fmt.Printf("Got back: <%s>\n", answer)
-		}
-	}()
-
-	c.Wait()
+	return ret
 }
+
+func dataToMqtt(client MQTT.Client) {
+	var prevState []string
+
+	pub_topic := getEnv("MQTT_TOPIC", "PRESENCE")
+
+	for packet := range tcpData {
+		present := textToPresent(packet)
+		gone := diff(present, prevState)
+		_new := diff(prevState, present)
+
+		if len(_new) > 0 {
+			fmt.Printf("New: %v\n", _new)
+		}
+		if len(gone) > 0 {
+			fmt.Printf("Gone: %v\n", gone)
+		}
+
+		for _, item := range gone {
+			topic := fmt.Sprintf("%s/%s", pub_topic, item)
+			fmt.Printf("Publishing to %s!\n", topic)
+			token := client.Publish(topic, 0, false, "0") // qos retained msg
+			token.Wait()
+		}
+		for _, item := range _new {
+			topic := fmt.Sprintf("%s/%s", pub_topic, item)
+			fmt.Printf("Publishing to %s!\n", topic)
+			token := client.Publish(topic, 0, false, "1") // qos retained msg
+			token.Wait()
+		}
+		prevState = present
+	}
+}
+func handleTCPConn(conn net.Conn) {
+	defer conn.Close()
+	data, err := ioutil.ReadAll(conn)
+	if err != nil {
+		fmt.Printf("Error reading: %s\n", err)
+		return
+	}
+	strdata := string(data)
+	//fmt.Printf("Read %+v\n", strdata)
+	tcpData <- strdata
+}
+func listenTcp() {
+	port := fmt.Sprintf(":%s", getEnv("TCP_PORT", "3334"))
+	fmt.Printf("Listening on port %s\n", port)
+	socket, err := net.Listen("tcp", port)
+	if err != nil {
+		panic(err)
+	}
+	for {
+		//fmt.Println("Waiting for conn")
+		conn, err := socket.Accept()
+		if err != nil {
+			panic(err)
+		}
+		//fmt.Println("Accepted something")
+		go handleTCPConn(conn)
+	}
+}
+
 func main() {
-	setupMqtt()
-	fmt.Printf("Using TV_ID: %s\n", TV_ID)
-	runCecClient()
+	client := setupMqtt()
+	defer client.Disconnect(250)
+	go dataToMqtt(client)
+	listenTcp()
 }
+
 func getEnv(key, fallback string) string {
 	if value, ok := os.LookupEnv(key); ok {
 		return value
 	}
 	return fallback
+}
+
+func diff(X, Y []string) []string {
+
+	diff := []string{}
+	vals := map[string]struct{}{}
+
+	for _, x := range X {
+		vals[x] = struct{}{}
+	}
+
+	for _, x := range Y {
+		if _, ok := vals[x]; !ok {
+			diff = append(diff, x)
+		}
+	}
+
+	return diff
 }
